@@ -58,6 +58,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	}
 
 	s.Identify.Intents = discordgo.IntentsGuildMessages |
+		discordgo.IntentsGuilds |
 		discordgo.IntentsMessageContent |
 		discordgo.IntentsGuildVoiceStates
 
@@ -334,16 +335,14 @@ func (b *Bot) resolveTextChannel(defaultChannel string) string {
 }
 
 func findUserVoiceChannel(s *discordgo.Session, guildID, userID string) string {
-	g, err := s.State.Guild(guildID)
-	if err != nil || g == nil {
+	if s == nil || s.State == nil {
 		return ""
 	}
 
-	for _, vs := range g.VoiceStates {
-		if vs.UserID == userID {
-			return vs.ChannelID
-		}
+	vs, err := s.State.VoiceState(guildID, userID)
+	if err != nil || vs == nil {
+		return ""
 	}
 
-	return ""
+	return vs.ChannelID
 }

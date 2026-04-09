@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -107,11 +108,23 @@ func (c *Client) analyzeWithModel(ctx context.Context, logs []logcache.Entry, mo
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "client.timeout") {
+			log.Printf("gemini request timed out, using fallback analysis")
+			return fallbackAnalysis(logs), nil
+		}
 		return Analysis{}, err
 	}
 	defer resp.Body.Close()
 
 	rspBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		log.Printf("gemini quota exceeded, using fallback analysis")
+		return fallbackAnalysis(logs), nil
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode >= 500 {
+		log.Printf("gemini temporarily unavailable (%d), using fallback analysis", resp.StatusCode)
+		return fallbackAnalysis(logs), nil
+	}
 	if resp.StatusCode >= 400 {
 		return Analysis{}, fmt.Errorf("gemini error: %s", strings.TrimSpace(string(rspBody)))
 	}
