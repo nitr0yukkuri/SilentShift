@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -27,7 +28,7 @@ func Load() Config {
 	c := Config{
 		DiscordToken:      os.Getenv("DISCORD_BOT_TOKEN"),
 		GeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
-		GeminiModel:       getEnv("GEMINI_MODEL", "gemini-2.5-flash"),
+		GeminiModel:       normalizeGeminiModel(getEnv("GEMINI_MODEL", "gemini-flash-latest")),
 		SilenceThreshold:  secondsToDuration(getEnv("SILENCE_SECONDS", "7"), 7),
 		InterveneCooldown: secondsToDuration(getEnv("INTERVENE_COOLDOWN_SECONDS", "45"), 45),
 		CacheSize:         getEnvInt("CACHE_SIZE", 64),
@@ -68,4 +69,14 @@ func secondsToDuration(raw string, fallback int) time.Duration {
 		n = fallback
 	}
 	return time.Duration(n) * time.Second
+}
+
+func normalizeGeminiModel(model string) string {
+	m := strings.TrimSpace(strings.ToLower(model))
+	switch m {
+	case "", "gemini-3.1-flash", "models/gemini-3.1-flash":
+		return "gemini-flash-latest"
+	default:
+		return strings.TrimSpace(model)
+	}
 }

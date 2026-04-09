@@ -42,10 +42,10 @@ func (c *Client) Analyze(ctx context.Context, logs []logcache.Entry) (Analysis, 
 		return fallbackAnalysis(logs), nil
 	}
 
-	models := []string{c.model, "gemini-2.5-flash", "gemini-flash-latest"}
+	models := []string{canonicalModelName(c.model), "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite"}
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
-		model = strings.TrimSpace(model)
+		model = canonicalModelName(model)
 		if model == "" {
 			continue
 		}
@@ -167,6 +167,16 @@ func isMissingModelError(err error) bool {
 	return strings.Contains(msg, "status: \"not_found\"") ||
 		strings.Contains(msg, "code\": 404") ||
 		strings.Contains(msg, "not found")
+}
+
+func canonicalModelName(model string) string {
+	m := strings.TrimSpace(strings.ToLower(model))
+	switch m {
+	case "", "gemini-3.1-flash", "models/gemini-3.1-flash":
+		return "gemini-flash-latest"
+	default:
+		return strings.TrimSpace(model)
+	}
 }
 
 func fallbackAnalysis(logs []logcache.Entry) Analysis {
