@@ -27,7 +27,7 @@ func Load() Config {
 	c := Config{
 		DiscordToken:      os.Getenv("DISCORD_BOT_TOKEN"),
 		GeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
-		GeminiModel:       getEnv("GEMINI_MODEL", "gemini-3.1-flash"),
+		GeminiModel:       getEnv("GEMINI_MODEL", "gemini-2.5-flash"),
 		SilenceThreshold:  secondsToDuration(getEnv("SILENCE_SECONDS", "7"), 7),
 		InterveneCooldown: secondsToDuration(getEnv("INTERVENE_COOLDOWN_SECONDS", "45"), 45),
 		CacheSize:         getEnvInt("CACHE_SIZE", 64),

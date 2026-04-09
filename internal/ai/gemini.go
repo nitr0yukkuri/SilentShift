@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -40,6 +41,33 @@ func (c *Client) Analyze(ctx context.Context, logs []logcache.Entry) (Analysis, 
 		return fallbackAnalysis(logs), nil
 	}
 
+	models := []string{c.model, "gemini-2.5-flash", "gemini-flash-latest"}
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		if _, ok := seen[model]; ok {
+			continue
+		}
+		seen[model] = struct{}{}
+
+		analysis, err := c.analyzeWithModel(ctx, logs, model)
+		if err == nil {
+			return analysis, nil
+		}
+		if !isMissingModelError(err) {
+			return Analysis{}, err
+		}
+		log.Printf("gemini model unavailable, retrying with fallback: %s", model)
+	}
+
+	return fallbackAnalysis(logs), nil
+}
+
+func (c *Client) analyzeWithModel(ctx context.Context, logs []logcache.Entry, model string) (Analysis, error) {
+
 	type promptPayload struct {
 		Logs []logcache.Entry `json:"logs"`
 	}
@@ -70,7 +98,7 @@ func (c *Client) Analyze(ctx context.Context, logs []logcache.Entry) (Analysis, 
 	}
 
 	rawBody, _ := json.Marshal(body)
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", c.model, c.apiKey)
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, c.apiKey)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawBody))
 	if err != nil {
 		return Analysis{}, err
@@ -116,6 +144,16 @@ func (c *Client) Analyze(ctx context.Context, logs []logcache.Entry) (Analysis, 
 	}
 
 	return out, nil
+}
+
+func isMissingModelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "status: \"not_found\"") ||
+		strings.Contains(msg, "code\": 404") ||
+		strings.Contains(msg, "not found")
 }
 
 func fallbackAnalysis(logs []logcache.Entry) Analysis {
