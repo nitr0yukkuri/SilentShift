@@ -37,6 +37,7 @@ type silenceWatcher struct {
 	textChannelID    string
 	lastPacketAt     time.Time
 	lastIntervenedAt time.Time
+	fallbackMode     bool
 	voiceConn        *discordgo.VoiceConnection
 	cancel           context.CancelFunc
 }
@@ -108,12 +109,21 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 	}
 	b.cache.Add(entry)
 
+	b.mu.Lock()
+	if w, ok := b.watchers[m.GuildID]; ok && w.fallbackMode {
+		// In fallback mode we use text activity as the silence signal source.
+		w.lastPacketAt = time.Now()
+	}
+	b.mu.Unlock()
+
 	content := strings.TrimSpace(m.Content)
 	switch content {
 	case "!silentshift join":
 		b.handleJoinCommand(s, m)
 	case "!silentshift leave":
 		b.handleLeaveCommand(s, m)
+	case "!silentshift test":
+		b.handleTestCommand(s, m)
 	}
 }
 
@@ -152,9 +162,10 @@ func (b *Bot) handleJoinCommand(s *discordgo.Session, m *discordgo.MessageCreate
 	b.mu.Unlock()
 
 	vc, err := s.ChannelVoiceJoin(m.GuildID, voiceChannelID, false, true)
+	fallbackMode := false
 	if err != nil {
-		_, _ = s.ChannelMessageSend(m.ChannelID, "VC接続に失敗: "+err.Error())
-		return
+		fallbackMode = true
+		log.Printf("voice join failed, fallback mode enabled: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -163,6 +174,7 @@ func (b *Bot) handleJoinCommand(s *discordgo.Session, m *discordgo.MessageCreate
 		voiceChannelID: voiceChannelID,
 		textChannelID:  b.resolveTextChannel(m.ChannelID),
 		lastPacketAt:   time.Now(),
+		fallbackMode:   fallbackMode,
 		voiceConn:      vc,
 		cancel:         cancel,
 	}
@@ -172,6 +184,14 @@ func (b *Bot) handleJoinCommand(s *discordgo.Session, m *discordgo.MessageCreate
 	b.mu.Unlock()
 
 	go b.monitorSilence(ctx, watcher)
+	if watcher.voiceConn != nil {
+		go b.ensureVoiceReady(ctx, watcher)
+	}
+
+	if watcher.fallbackMode {
+		_, _ = s.ChannelMessageSend(m.ChannelID, "SilentShift起動: VC接続失敗のためフォールバック監視を開始（テキスト無活動ベース）。")
+		return
+	}
 
 	_, _ = s.ChannelMessageSend(m.ChannelID, "SilentShift起動: VC沈黙監視を開始。")
 }
@@ -194,6 +214,14 @@ func (b *Bot) handleLeaveCommand(s *discordgo.Session, m *discordgo.MessageCreat
 	_, _ = s.ChannelMessageSend(m.ChannelID, "SilentShift停止: 監視を終了。")
 }
 
+func (b *Bot) handleTestCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	if err := b.triggerIntervention(context.Background(), b.resolveTextChannel(m.ChannelID)); err != nil {
+		_, _ = s.ChannelMessageSend(m.ChannelID, "介入テストに失敗: "+err.Error())
+		return
+	}
+	_, _ = s.ChannelMessageSend(m.ChannelID, "介入テストを実行しました。")
+}
+
 func (b *Bot) monitorSilence(ctx context.Context, w *silenceWatcher) {
 	ticker := time.NewTicker(400 * time.Millisecond)
 	defer ticker.Stop()
@@ -211,29 +239,7 @@ func (b *Bot) monitorSilence(ctx context.Context, w *silenceWatcher) {
 				continue
 			}
 
-			logs := b.cache.LastN(24)
-			analysis, err := b.analyzer.Analyze(ctx, logs)
-			if err != nil {
-				log.Printf("analysis failed: %v", err)
-				continue
-			}
-
-			roomID := uuid.NewString()
-			roomURL := buildRoomURL(b.cfg.RoomBaseURL, roomID, analysis.Theme, analysis.Params)
-
-			message := fmt.Sprintf(
-				"## SILENTSHIFT INTERVENTION\\n"+
-					"%s\\n\\n"+
-					"- awkwardness: **%d/100**\\n"+
-					"- theme: **%s**\\n"+
-					"- room: %s",
-				analysis.TauntMessage,
-				analysis.AwkwardnessScore,
-				analysis.Theme,
-				roomURL,
-			)
-
-			if _, err := b.session.ChannelMessageSend(w.textChannelID, message); err != nil {
+			if err := b.triggerIntervention(ctx, w.textChannelID); err != nil {
 				log.Printf("failed to post intervention: %v", err)
 				continue
 			}
@@ -242,6 +248,66 @@ func (b *Bot) monitorSilence(ctx context.Context, w *silenceWatcher) {
 			w.lastPacketAt = now
 		}
 	}
+}
+
+func (b *Bot) ensureVoiceReady(ctx context.Context, w *silenceWatcher) {
+	// Some Discord regions now require E2EE/DAVE for voice; if voice never gets ready,
+	// switch to fallback mode to keep testing and intervention flow alive.
+	for i := 0; i < 6; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+
+		if w.voiceConn == nil {
+			return
+		}
+		if w.voiceConn.Ready {
+			return
+		}
+	}
+
+	b.mu.Lock()
+	if w.fallbackMode {
+		b.mu.Unlock()
+		return
+	}
+	w.fallbackMode = true
+	w.lastPacketAt = time.Now()
+	b.mu.Unlock()
+
+	if w.voiceConn != nil {
+		_ = w.voiceConn.Disconnect()
+	}
+
+	_, _ = b.session.ChannelMessageSend(w.textChannelID, "VC音声接続が不安定なため、フォールバック監視へ切替（`!silentshift test` も利用可）。")
+}
+
+func (b *Bot) triggerIntervention(ctx context.Context, textChannelID string) error {
+	logs := b.cache.LastN(24)
+	analysis, err := b.analyzer.Analyze(ctx, logs)
+	if err != nil {
+		return err
+	}
+
+	roomID := uuid.NewString()
+	roomURL := buildRoomURL(b.cfg.RoomBaseURL, roomID, analysis.Theme, analysis.Params)
+
+	message := fmt.Sprintf(
+		"## SILENTSHIFT INTERVENTION\n"+
+			"%s\n\n"+
+			"- awkwardness: **%d/100**\n"+
+			"- theme: **%s**\n"+
+			"- room: %s",
+		analysis.TauntMessage,
+		analysis.AwkwardnessScore,
+		analysis.Theme,
+		roomURL,
+	)
+
+	_, err = b.session.ChannelMessageSend(textChannelID, message)
+	return err
 }
 
 func buildRoomURL(baseURL, roomID, theme string, params []string) string {
