@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -19,6 +21,9 @@ type Config struct {
 }
 
 func Load() Config {
+	// Best-effort local env loading; CI/production can still rely on real env vars.
+	_ = godotenv.Load()
+
 	c := Config{
 		DiscordToken:      os.Getenv("DISCORD_BOT_TOKEN"),
 		GeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
