@@ -1,0 +1,10 @@
+bin/
+dist/
+tmp/
+
+.env
+.env.local
+
+web/node_modules/
+web/.next/
+web/out/

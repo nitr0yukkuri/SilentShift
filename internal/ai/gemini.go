@@ -1,0 +1,133 @@
+package ai
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"silentshift/internal/config"
+	"silentshift/internal/logcache"
+)
+
+type Client struct {
+	httpClient *http.Client
+	apiKey     string
+	model      string
+}
+
+type Analysis struct {
+	AwkwardnessScore int      `json:"awkwardnessScore"`
+	Theme            string   `json:"theme"`
+	Params           []string `json:"params"`
+	TauntMessage     string   `json:"tauntMessage"`
+}
+
+func NewClient(cfg config.Config) *Client {
+	return &Client{
+		httpClient: &http.Client{Timeout: 8 * time.Second},
+		apiKey:     cfg.GeminiAPIKey,
+		model:      cfg.GeminiModel,
+	}
+}
+
+func (c *Client) Analyze(ctx context.Context, logs []logcache.Entry) (Analysis, error) {
+	if c.apiKey == "" {
+		return fallbackAnalysis(logs), nil
+	}
+
+	type promptPayload struct {
+		Logs []logcache.Entry `json:"logs"`
+	}
+
+	payload := promptPayload{Logs: logs}
+	payloadJSON, _ := json.Marshal(payload)
+
+	instruction := "" +
+		"あなたはDiscordの沈黙介入AIです。会話ログから気まずさを解析し、" +
+		"JSONのみを返してください。\n" +
+		"必須JSON schema: " +
+		"{awkwardnessScore:number(0-100),theme:string,params:string[],tauntMessage:string}\n" +
+		"tauntMessageは短く煽り気味、ただし攻撃的すぎない。"
+
+	body := map[string]any{
+		"contents": []map[string]any{
+			{
+				"parts": []map[string]string{
+					{"text": instruction},
+					{"text": string(payloadJSON)},
+				},
+			},
+		},
+		"generationConfig": map[string]any{
+			"temperature":      0.7,
+			"responseMimeType": "application/json",
+		},
+	}
+
+	rawBody, _ := json.Marshal(body)
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", c.model, c.apiKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawBody))
+	if err != nil {
+		return Analysis{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return Analysis{}, err
+	}
+	defer resp.Body.Close()
+
+	rspBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return Analysis{}, fmt.Errorf("gemini error: %s", strings.TrimSpace(string(rspBody)))
+	}
+
+	var parsed struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(rspBody, &parsed); err != nil {
+		return Analysis{}, err
+	}
+
+	if len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Parts) == 0 {
+		return fallbackAnalysis(logs), nil
+	}
+
+	text := strings.TrimSpace(parsed.Candidates[0].Content.Parts[0].Text)
+	var out Analysis
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		return fallbackAnalysis(logs), nil
+	}
+
+	if out.Theme == "" {
+		return fallbackAnalysis(logs), nil
+	}
+
+	return out, nil
+}
+
+func fallbackAnalysis(logs []logcache.Entry) Analysis {
+	theme := "深夜テンション重力逆転ドッジ"
+	if len(logs) > 0 {
+		theme = "会話の余韻を殴る段差マラソン"
+	}
+
+	return Analysis{
+		AwkwardnessScore: 72,
+		Theme:            theme,
+		Params:           []string{"low_gravity", "banana_friction", "panic_timer_40s"},
+		TauntMessage:     "沈黙、検知。言葉は不要。まずは協力してこの地獄を越えろ。",
+	}
+}
