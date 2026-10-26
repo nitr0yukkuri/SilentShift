@@ -25,7 +25,7 @@ It replaces the subjective friction of “awkwardness” with a shared, non-verb
 
 ### Non-functional requirements
 
-1. **Real-time behavior:** Keep I/O latency at zero while monitoring audio packets, and make the path from silence detection to posting a URL in Discord seamless (accelerated inference with Gemini 3.1 Flash).
+1. **Real-time behavior:** Keep audio-packet monitoring lightweight and minimize the delay from silence detection to posting a URL in Discord (with faster inference from Gemini 3.1 Flash).
 2. **Scalability:** Safely manage Go routine lifecycles to support simultaneous operation across multiple servers and voice channels, preventing memory leaks.
 3. **Availability:** Keep the bot server running continuously (CPU always allocated) rather than scaling it to zero, to maintain WebSocket connections.
 
